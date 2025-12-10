@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": ".NET Core Launch (console)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/Queryly.CLI/bin/Debug/net8.0/Queryly.CLI.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/src/Queryly.CLI",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    }
+  ]
+}

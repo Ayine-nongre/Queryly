@@ -2,6 +2,7 @@ using System.Data;
 using Spectre.Console;
 using Queryly.Core.Connections;
 using Queryly.Core.Query;
+using Azure;
 
 namespace Queryly.CLI.Commands;
 
@@ -21,31 +22,71 @@ public static class DataCommand
                 return;
             }
 
-            await AnsiConsole.Status()
-                .StartAsync("Loading data...", async ctx =>
+            // await AnsiConsole.Status()
+            //     .StartAsync("Loading data...", async ctx =>
+            //     {
+
+            //     });
+            var provider = GetProvider(connection.DbType);
+            using var dbConnection = await provider.OpenConnectionAsync(connection.ConnectionString);
+
+            var executor = new QueryExecutor(dbConnection);
+            var count = await executor.ExecuteScalarAsync($"SELECT COUNT(*) FROM [{tableName}]");
+            var totalRows = Convert.ToInt32(count);
+            var pageSize = 50;
+            var totalPages = (int)Math.Ceiling(totalRows / (double)pageSize);
+            PaginationInfo pageInfo = new PaginationInfo(1, pageSize)
+            {
+                TotalRows = totalRows,
+                TotalPages = totalPages
+            };
+
+            while (true)
+            {
+                AnsiConsole.MarkupLine($"[bold blue]Browsing Table:[/] {tableName} ([grey]{totalRows} rows, {totalPages} pages[/])\n");
+
+                var sql = $"SELECT * FROM [{tableName}] LIMIT {pageSize} OFFSET {(pageInfo.PageNumber - 1) * pageSize}";
+                var result = await WithLoadingAsync(
+    "Loading page data...",
+    () => executor.ExecuteQueryAsync(sql)
+);
+
+                if (!result.IsSuccess)
                 {
-                    var provider = GetProvider(connection.DbType);
-                    using var dbConnection = await provider.OpenConnectionAsync(connection.ConnectionString);
-                    
-                    var executor = new QueryExecutor(dbConnection);
-                    var sql = $"SELECT * FROM [{tableName}] LIMIT 50";
-                    var result = await executor.ExecuteQueryAsync(sql);
-                    
-                    if (!result.IsSuccess)
-                    {
-                        AnsiConsole.MarkupLine($"[red]✗ Query failed: {result.ErrorMessage}[/]");
-                        return;
-                    }
-                    
-                    DisplayDataTable(result.Data, tableName, result.ExecutionTime);
-                });
+                    AnsiConsole.MarkupLine($"[red]✗ Query failed: {result.ErrorMessage}[/]");
+                    return;
+                }
+
+                DisplayDataTable(result.Data, tableName, result.ExecutionTime);
+                ShowPaginationFooter(pageInfo);
+
+                var command = AnsiConsole.Ask<string>("[blue]Command>[/]").Trim().ToLower();
+
+                if (command == "n") { PaginationInfo.NextPage(pageInfo); }
+                else if (command == "p") { PaginationInfo.PreviousPage(pageInfo); }
+                else if (command == "g" || command == "go")
+                {
+                    int pageNumber = AnsiConsole.Ask<int>("Enter page number:");
+                    if (pageNumber >= 1 && pageNumber <= totalPages)
+                        pageInfo.GoToPage(pageNumber);
+                    else
+                        AnsiConsole.MarkupLine("[red]Invalid page number.[/]");
+                    continue;
+                }
+                else if (command == "q") break;
+                else
+                {
+                    AnsiConsole.MarkupLine("[red]✗ Unknown command.[/]");
+                    break;
+                }
+            }
         }
         catch (Exception ex)
         {
             AnsiConsole.MarkupLine($"[red]✗ Error: {ex.Message}[/]");
         }
     }
-    
+
     public static async Task ExecuteQueryAsync(string connectionName)
     {
         try
@@ -70,7 +111,7 @@ public static class DataCommand
             while (true)
             {
                 var sql = AnsiConsole.Ask<string>("[blue]SQL>[/]");
-                
+
                 if (sql.Trim().ToLower() == "exit")
                 {
                     break;
@@ -100,7 +141,7 @@ public static class DataCommand
             AnsiConsole.MarkupLine($"[red]✗ Error: {ex.Message}[/]");
         }
     }
-    
+
     public static async Task ExportTableAsync(string connectionName, string tableName, string format)
     {
         try
@@ -132,7 +173,7 @@ public static class DataCommand
                     }
 
                     var fileName = $"{tableName}_{DateTime.Now:yyyyMMdd_HHmmss}.{format}";
-                    
+
                     if (format.ToLower() == "csv")
                     {
                         await ExportToCsvAsync(result.Data, fileName);
@@ -155,7 +196,7 @@ public static class DataCommand
             AnsiConsole.MarkupLine($"[red]✗ Error: {ex.Message}[/]");
         }
     }
-    
+
     private static void DisplayDataTable(DataTable? data, string title, TimeSpan executionTime)
     {
         if (data == null || data.Rows.Count == 0)
@@ -167,32 +208,32 @@ public static class DataCommand
         var table = new Table();
         table.Border = TableBorder.Rounded;
         table.Title = new TableTitle($"[bold]{title}[/]");
-        
+
         foreach (DataColumn column in data.Columns)
         {
             table.AddColumn(column.ColumnName);
         }
-        
+
         var rowCount = Math.Min(data.Rows.Count, 50);
         for (int i = 0; i < rowCount; i++)
         {
             var row = data.Rows[i];
             var values = new string[data.Columns.Count];
-            
+
             for (int j = 0; j < data.Columns.Count; j++)
             {
                 var value = row[j];
                 values[j] = value == DBNull.Value ? "[grey]NULL[/]" : value.ToString() ?? "";
-                
+
                 if (values[j].Length > 50)
                 {
                     values[j] = values[j].Substring(0, 47) + "...";
                 }
             }
-            
+
             table.AddRow(values);
         }
-        
+
         AnsiConsole.Write(table);
         AnsiConsole.MarkupLine($"\n[grey]Showing {rowCount} of {data.Rows.Count} row(s) | Query time: {executionTime.TotalMilliseconds:F2}ms[/]");
     }
@@ -202,13 +243,13 @@ public static class DataCommand
         if (data == null) return;
 
         using var writer = new StreamWriter(fileName);
-        
+
         var headers = string.Join(",", data.Columns.Cast<DataColumn>().Select(c => c.ColumnName));
         await writer.WriteLineAsync(headers);
-        
+
         foreach (DataRow row in data.Rows)
         {
-            var values = row.ItemArray.Select(v => 
+            var values = row.ItemArray.Select(v =>
             {
                 var str = v?.ToString() ?? "";
                 if (str.Contains(",") || str.Contains("\"") || str.Contains("\n"))
@@ -226,7 +267,7 @@ public static class DataCommand
         if (data == null) return;
 
         var rows = new List<Dictionary<string, object?>>();
-        
+
         foreach (DataRow row in data.Rows)
         {
             var dict = new Dictionary<string, object?>();
@@ -237,14 +278,58 @@ public static class DataCommand
             rows.Add(dict);
         }
 
-        var json = System.Text.Json.JsonSerializer.Serialize(rows, new System.Text.Json.JsonSerializerOptions 
-        { 
-            WriteIndented = true 
+        var json = System.Text.Json.JsonSerializer.Serialize(rows, new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true
         });
-        
+
         await File.WriteAllTextAsync(fileName, json);
     }
-    
+
+    public static void ShowPaginationFooter(PaginationInfo pageInfo)
+    {
+        int startRow = ((pageInfo.PageNumber - 1) * pageInfo.PageSize) + 1;
+        int endRow = Math.Min(pageInfo.PageNumber * pageInfo.PageSize, pageInfo.TotalRows);
+
+        // Header line
+        AnsiConsole.MarkupLine("[grey]──────────────────────────────────────────────────────────────[/]");
+
+        // Page and row summary
+        AnsiConsole.MarkupLine(
+            $"[bold] Page {pageInfo.PageNumber} of {pageInfo.TotalPages}[/]    " +
+            $"[grey]Rows {startRow}–{endRow} of {pageInfo.TotalRows}[/]");
+
+        // Footer line
+        AnsiConsole.MarkupLine("[grey]──────────────────────────────────────────────────────────────[/]");
+
+        // Commands
+        AnsiConsole.MarkupLine(
+            "Commands:  " +
+            "[blue][[N]][/]ext  •  " +
+            "[blue][[P]][/]rev  •  " +
+            "[blue][[G]][/]o to page  •  " +
+            "[red][[Q]][/]uit");
+
+        // Another separator
+        AnsiConsole.MarkupLine("[grey]──────────────────────────────────────────────────────────────[/]\n");
+    }
+
+    public static async Task<T> WithLoadingAsync<T>(string message, Func<Task<T>> action)
+    {
+        T result = default!;
+
+        await AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots)
+            .SpinnerStyle(Style.Parse("yellow"))
+            .StartAsync(message, async ctx =>
+            {
+                result = await action();
+            });
+
+        return result;
+    }
+
+
     private static IConnectionProvider GetProvider(DatabaseType type)
     {
         return type switch
